@@ -30,14 +30,56 @@ nvidia-xconfig --cool-bits=4
 To update your `/etc/X11/xorg.conf` manually instead, scroll down to see an example.
 
 
+## Stress test
+
+It is important to stress test your system to ensure that it won't catch fire 🔥
+
+I found this simple stress test tool called [gpu-burn](https://github.com/wilicc/gpu-burn). Here are
+the steps I use to run the stress test.
+
+First let's clone this repo and the stress-test repo:
+```
+git clone https://github.com/KristianHolsheimer/nvidia-fan-controller.git
+git clone https://github.com/wilicc/gpu-burn.git
+```
+
+Navigate to the `nvidia-fan-controller` dir and run:
+```
+python3 nvidia_fan_controller.py --target-temperature 60
+```
+
+In another terminal, navigate to the `gpu-burn` dir and compile (you only need to do this once):
+
+```
+make
+```
+
+then run (10 minutes = 600 secs):
+
+```
+./gpu-burn 600
+```
+
+You may want to open a third terminal to monitor your GPUs:
+
+```
+nvidia-smi --loop=1
+```
+
+If you'd like to selectively stress-test your GPUs, you can set the `CUDA_VISIBLE_DEVICES` variable.
+For example, here's how I sandwich an idle GPU between two fully-loaded ones:
+
+```
+CUDA_VISIBLE_DEVICES=0,2 ./gpu-burn 600
+```
+
 ## Install as a service
 
 You would probably like to **automatically start** the controller at start-up. Here's how to do that
 using `systemd`.
 
-First see if the script runs without any issues, preferably running some benchmark / stress-test on
-your GPU to check if the fan speed is properly regulated by the controller. The latter is important
-to ensure that your computer won't catch fire 🔥.
+It is highly recommended to a stress-test (like the example above) to check if the fan speed is
+properly regulated by the controller.
 
 Create a systemd service file:
 
