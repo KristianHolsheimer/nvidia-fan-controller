@@ -4,7 +4,7 @@ import re
 import os
 import logging
 import subprocess
-from typing import Optional
+from typing import Optional, List, Tuple
 from contextlib import AbstractContextManager
 
 
@@ -130,42 +130,46 @@ class ManualFanControl(AbstractContextManager):
         run_cmd(['nvidia-settings', '--assign', 'GPUFanControlState=0'])
 
 
-def run_cmd(cmd):
+def run_cmd(cmd: List[str]) -> str:
     logger.debug(f"Running cmd: {' '.join(cmd)}")
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     p.wait()
 
     if p.returncode:
-        logger.fatal(f"Unable to run cmd: {' '.join(cmd)}")
-        for line in p.stderr.readlines():
-            line = line.decode().strip()
-            if line:
-                logger.error(f'Caught process stderr: {line}')
-        raise subprocess.CalledProcessError(p.returncode, cmd)
+        logger.critical(f"Unable to run cmd: {' '.join(cmd)}")
+        if p.stderr is not None:
+            for line_bytes in p.stderr.readlines():
+                line = line_bytes.decode().strip()
+                if line:
+                    logger.error(f'Caught process stderr: {line}')
+            raise subprocess.CalledProcessError(p.returncode, cmd)
+
+    if p.stdout is None:
+        return ''
 
     return p.stdout.read().decode()
 
 
-def get_temperature():
-    stdout = run_cmd(['nvidia-smi', '--query-gpu=index,temperature.gpu', '--format=csv,noheader'])
-    measurements = re.findall(r'(\d+), (\d+)', stdout, flags=re.MULTILINE)
+def get_measurements() -> List[Tuple[int, int, int]]:
+    stdout = run_cmd(['nvidia-smi', '--query-gpu=index,temperature.gpu,fan.speed', '--format=csv,noheader'])
+    measurements = re.findall(r'(\d+), (\d+), (\d+) %', stdout, flags=re.MULTILINE)
     measurements = [tuple(map(int, values)) for values in measurements]  # parse ints
-    return measurements
+    return measurements  # [(index, temperature, fanspeed)]
 
 
-def get_fan_speed(index):
+def get_fan_speed(index: int) -> int:
     fan_speed = run_cmd(['nvidia-settings', '--query', f'[fan-{index:d}]/GPUTargetFanSpeed', '--terse'])
     logger.debug(f"Current fan speed setting: [fan-{index:d}]/GPUTargetFanSpeed={fan_speed:s}")
     return int(fan_speed)
 
 
-def set_fan_speed(index, fan_speed):
+def set_fan_speed(index: int, fan_speed: int) -> None:
     config = f'[fan-{index:d}]/GPUTargetFanSpeed={fan_speed:d}'
     logger.info(f"Setting new fan speed: {config}")
     run_cmd(['nvidia-settings', '--assign', config])
 
 
-def create_service_file(target_temperature=60, interval_secs=2):
+def create_service_file(target_temperature: int = 60, interval_secs: int = 2) -> None:
     script_filepath = os.path.abspath(__file__)
     service_filepath = os.path.join(os.path.dirname(script_filepath), 'nvidia-fan-controller.service')
 
@@ -178,7 +182,7 @@ def create_service_file(target_temperature=60, interval_secs=2):
         f.write(content)
 
 
-def main():
+def main() -> None:
     import argparse
     from time import sleep
 
@@ -195,18 +199,19 @@ def main():
         create_service_file(target_temperature=args.target_temperature, interval_secs=args.interval_secs)
         exit()
 
-    num_gpus = len(get_temperature())
-    if not num_gpus:
+    if not len(get_measurements()):
         raise RuntimeError("no gpu detected")
-    logger.info(f"Found {num_gpus} gpu(s)")
 
     # give each GPU its own controller
-    controllers = [PIDController(x_target=args.target_temperature, u_min=20, u_max=100) for _ in range(num_gpus)]
+    controllers = {
+        index: PIDController(x_target=args.target_temperature, u_min=10, u_max=100, u_start=measured_speed)
+        for index, _, measured_speed in get_measurements()}
 
     with ManualFanControl():
         while True:
-            for controller, (index, temp) in zip(controllers, get_temperature()):
+            for index, temp, _ in get_measurements():
                 # new speed proposed by PID-controller
+                controller = controllers[index]
                 fan_speed = int(round(controller(temp)))
 
                 # only update if change is non-trivial

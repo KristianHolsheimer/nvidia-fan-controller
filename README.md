@@ -215,3 +215,13 @@ The icon used in the github link preview is
 [Fan](https://thenounproject.com/term/fan/2871241) by
 [Amethyst Studio](https://thenounproject.com/AmethystStudio/) from the
 [Noun Project](https://thenounproject.com/).
+
+
+## Contributing
+
+To check the script for inconsistencies, I run:
+
+```
+flake8 nvidia_fan_controller.py --ignore E501
+mypy nvidia_fan_controller.py
+```
