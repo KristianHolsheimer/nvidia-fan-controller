@@ -187,7 +187,7 @@ def main() -> None:
     from time import sleep
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--target-temperature', type=int, default=60, help="target temperature (Celcius)")
+    parser.add_argument('--target-temperature', type=int, default=80, help="target max temperature (Celcius)")
     parser.add_argument('--interval-secs', type=int, default=2, help="number of seconds between consecutive updates")
     parser.add_argument('--log-level', choices=('DEBUG', 'INFO', 'WARN'), default='INFO', help="verbosity level")
     parser.add_argument('--create-service-file', action='store_true', help="create service file and exit")
