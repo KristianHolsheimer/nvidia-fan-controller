@@ -2,9 +2,10 @@
 
 import re
 import os
+import sys
 import logging
 import subprocess
-from typing import Optional, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from contextlib import AbstractContextManager
 
 
@@ -48,6 +49,11 @@ class PIDController:
         Ki: coefficient of integral term
         Kd: coefficient of derivative term
         gamma: discount factor for exponentially annealing past contributions to integral term
+        alpha: smoothing parameter for computing a rolling average error
+        e_min: lower bound for the error = x_observed - x_target
+        e_max: upper bound for the error = x_observed - x_target
+        e_total_min: lower bound for the accumulated error
+        e_total_max: upper bound for the accumulated error
 
     """
     def __init__(
@@ -58,9 +64,14 @@ class PIDController:
             u_start: Optional[float] = None,
             reverse: bool = False,
             Kp: float = 0.5,
-            Ki: float = 0.45,
-            Kd: float = 0.6,
-            gamma: float = 0.95):
+            Ki: float = 1.0,
+            Kd: float = 1.0,
+            gamma: float = 0.9,
+            alpha: float = 0.5,
+            e_min: float = -float('inf'),
+            e_max: float = float('inf'),
+            e_total_min: float = -float('inf'),
+            e_total_max: float = float('inf')):
 
         self.u_min = u_min
         self.u_max = u_max
@@ -71,21 +82,40 @@ class PIDController:
         self.Ki = Ki
         self.Kd = Kd
         self.gamma = gamma
+        self.alpha = alpha
+        self.e_min = e_min
+        self.e_max = e_max
+        self.e_total_min = e_total_min
+        self.e_total_max = e_total_max
         self.reset_state()
 
     @property
-    def x_target(self):
+    def x_target(self) -> float:
         return self.__x_target
 
     @x_target.setter
-    def x_target(self, x_target_new):
+    def x_target(self, x_target_new: float) -> None:
         self.__x_target = x_target_new
         self.reset_state()
 
-    def reset_state(self):
+    def reset_state(self) -> None:
         self._u = self.u_start
         self._e_total = 0.
         self._e_prev = 0.
+
+    def __repr__(self) -> str:
+        config = ', '.join(f'{k}={v:r}' for k, v in self.__dict__.items() if not k.startswith('_'))
+        state = ', '.join(f'{k}: {v:r}' for k, v in self.get_state().items())
+        return f'{type(self).__name__}({config}) {{ {state} }}'
+
+    def get_state(self) -> Dict[str, float]:
+        """Return a summary of the current state."""
+        return {
+            'u': self._u,
+            'e_prev': self._e_prev,
+            'e_total': self._e_total,
+            'x_target': self.x_target,
+        }
 
     def __call__(self, x_obs: float) -> float:
         """
@@ -99,22 +129,36 @@ class PIDController:
 
         """
         e = x_obs - self.x_target
+
+        # Clip residual.
+        e = max(self.e_min, min(self.e_max, e))
+
         if self.reverse:
             e = -e
 
+        # use Polyak smoothing for the proportional term
+        e_smooth = self.alpha * e + (1 - self.alpha) * self._e_prev
+
         # PID terms (proportional, integral, derivative)
-        p = e
+        p = e_smooth
         i = e + self.gamma * self._e_total
         d = e - self._e_prev
 
         # control variable (clipped to provided range)
         u = max(self.u_min, min(self.u_max, self.Kp * p + self.Ki * i + self.Kd * d))
 
-        # only update state if the control variable changes
-        if self._u != u:
+        logger.debug(  # pylint: disable=logging-fstring-interpolation
+            "Kp * p + Ki * i + Kd * d = "
+            f"{self.Kp} * {p:.2f} + {self.Ki} * {i:.2f} + {self.Kd} * {d:.2f} = "
+            f"{self.Kp * p:.2f} + {self.Ki * i:.2f} + {self.Kd * d:.2f} = "
+            f"{self.Kp * p + self.Ki * i + self.Kd * d:.2f}, "
+            f"u_clipped = {u:.2f}")
+
+        # update state
+        if u != self._u:
             self._u = u
-            self._e_total = i
-            self._e_prev = e
+            self._e_total = max(self.e_total_min, min(self.e_total_max, i))
+            self._e_prev = e_smooth
 
         return self._u
 
@@ -131,17 +175,17 @@ class ManualFanControl(AbstractContextManager):
 
 
 def run_cmd(cmd: List[str]) -> str:
-    logger.debug(f"Running cmd: {' '.join(cmd)}")
+    logger.debug("Running cmd: %s", ' '.join(cmd))
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     p.wait()
 
     if p.returncode:
-        logger.critical(f"Unable to run cmd: {' '.join(cmd)}")
+        logger.critical("Unable to run cmd: %s", ' '.join(cmd))
         if p.stderr is not None:
             for line_bytes in p.stderr.readlines():
                 line = line_bytes.decode().strip()
                 if line:
-                    logger.error(f'Caught process stderr: {line}')
+                    logger.error("Caught process stderr: %s", line)
             raise subprocess.CalledProcessError(p.returncode, cmd)
 
     if p.stdout is None:
@@ -159,13 +203,13 @@ def get_measurements() -> List[Tuple[int, int, int]]:
 
 def get_fan_speed(index: int) -> int:
     fan_speed = run_cmd(['nvidia-settings', '--query', f'[fan-{index:d}]/GPUTargetFanSpeed', '--terse'])
-    logger.debug(f"Current fan speed setting: [fan-{index:d}]/GPUTargetFanSpeed={fan_speed:s}")
+    logger.debug("Current fan speed setting: [fan-%d]/GPUTargetFanSpeed=%s", index, fan_speed)
     return int(fan_speed)
 
 
 def set_fan_speed(index: int, fan_speed: int) -> None:
     config = f'[fan-{index:d}]/GPUTargetFanSpeed={fan_speed:d}'
-    logger.info(f"Setting new fan speed: {config}")
+    logger.info("Setting new fan speed: %s", config)
     run_cmd(['nvidia-settings', '--assign', config])
 
 
@@ -176,9 +220,9 @@ def create_service_file(target_temperature: int = 60, interval_secs: int = 2) ->
     content = SERVICE_FILE_TEMPLATE.format(
         FILEPATH=script_filepath, TARGET_TEMPERATURE=target_temperature, INTERVAL_SECS=interval_secs, **os.environ)
 
-    logger.info(f"Creating/replacing service file at: {service_filepath}")
-    logger.debug(f"Creating/replacing service file content:\n{content}")
-    with open(service_filepath, 'w') as f:
+    logger.info("Creating/replacing service file at: %s", service_filepath)
+    logger.debug("Creating/replacing service file content:\n%r", content)
+    with open(service_filepath, 'w', encoding='utf-8') as f:
         f.write(content)
 
 
@@ -197,15 +241,15 @@ def main() -> None:
 
     if args.create_service_file:
         create_service_file(target_temperature=args.target_temperature, interval_secs=args.interval_secs)
-        exit()
+        sys.exit()
 
-    if not len(get_measurements()):
+    if not get_measurements():
         raise RuntimeError("no gpu detected")
 
     # give each GPU its own controller
     controllers = {
-        index: PIDController(x_target=args.target_temperature, u_min=10, u_max=100, u_start=measured_speed)
-        for index, _, measured_speed in get_measurements()}
+        index: PIDController(x_target=args.target_temperature, u_min=10, u_max=100, u_start=max(temp / 0.9, speed), e_total_min=-10)
+        for index, temp, speed in get_measurements()}
 
     with ManualFanControl():
         while True:
